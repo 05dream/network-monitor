@@ -1,0 +1,84 @@
+{% extends 'base.html' %}
+{% block title %}巡检报告 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">巡检报告</h2>
+
+<div class="card">
+  <div class="toolbar">
+    <label class="muted">统计周期</label>
+    <select id="hours">
+      <option value="1">近 1 小时</option>
+      <option value="6">近 6 小时</option>
+      <option value="24" selected>近 24 小时</option>
+      <option value="72">近 3 天</option>
+      <option value="168">近 7 天</option>
+    </select>
+    <button class="btn plain" onclick="preview()">预览当前报告</button>
+    {% if g.user['role'] == 'admin' %}
+    <button class="btn" id="genBtn" onclick="generate()">生成巡检报告</button>
+    {% endif %}
+    <span class="muted" id="tip" style="font-size:12px"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="font-size:15px;margin-bottom:10px">历史报告
+    <span class="muted" style="font-size:12px" id="cnt"></span></h3>
+  <table class="grid">
+    <thead><tr><th>文件名</th><th>大小</th><th>生成时间</th><th>操作</th></tr></thead>
+    <tbody id="body"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+function fmtSize(n) { return n < 1024 ? n + ' B' : (n < 1024 * 1024 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB'); }
+function hours() { return document.getElementById('hours').value; }
+
+function preview() {
+  window.open('/api/report/preview?hours=' + hours(), '_blank');
+}
+
+async function generate() {
+  const btn = document.getElementById('genBtn');
+  btn.disabled = true;
+  document.getElementById('tip').textContent = '正在生成…';
+  try {
+    const b = await (await fetch('/api/report/generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({hours: Number(hours())})})).json();
+    if (b.code !== 0) { alert(b.msg); return; }
+    document.getElementById('tip').textContent = '已生成：' + b.data.name;
+    loadList();
+  } finally { btn.disabled = false; }
+}
+
+async function del(name) {
+  if (!confirm(`删除报告 ${name}？`)) return;
+  const b = await (await fetch('/api/report/' + encodeURIComponent(name), {method: 'DELETE'})).json();
+  if (b.code !== 0) alert(b.msg);
+  loadList();
+}
+
+async function loadList() {
+  const b = await (await fetch('/api/report/list')).json();
+  if (b.code !== 0) return;
+  const list = b.data || [];
+  document.getElementById('cnt').textContent = list.length ? `（共 ${list.length} 份）` : '';
+  document.getElementById('body').innerHTML = list.length ? list.map(r => `<tr>
+    <td>${esc(r.name)}</td>
+    <td class="muted">${fmtSize(r.size)}</td>
+    <td class="muted">${esc(r.created_at)}</td>
+    <td>
+      <a class="btn plain" href="/api/report/download/${encodeURIComponent(r.name)}" target="_blank">预览</a>
+      <a class="btn plain" href="/api/report/download/${encodeURIComponent(r.name)}?dl=1">下载</a>
+      {% if g.user['role'] == 'admin' %}
+      <button class="btn danger" onclick="del('${esc(r.name)}')">删除</button>
+      {% endif %}
+    </td>
+  </tr>`).join('') : '<tr><td colspan="4" class="muted">还没有报告，点上方「生成巡检报告」创建</td></tr>';
+}
+
+loadList();
+</script>
+{% endblock %}

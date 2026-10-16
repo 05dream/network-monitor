@@ -1,0 +1,235 @@
+{% extends 'base.html' %}
+{% block title %}拓扑管理 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">拓扑管理</h2>
+
+<div class="card">
+  <div class="toolbar">
+    <button class="btn plain" onclick="autoArrange()">自动布局</button>
+    <button class="btn" onclick="saveNodes()">保存布局</button>
+    <span style="flex:1"></span>
+    <button class="btn plain" onclick="exportJson()">导出 JSON</button>
+    <label class="btn plain" style="cursor:pointer">导入 JSON
+      <input type="file" id="impFile" accept=".json,application/json" style="display:none"
+             onchange="importJson(this)">
+    </label>
+    <span class="muted" id="hint" style="font-size:12px"></span>
+  </div>
+  <div class="topo-wrap">
+    <svg id="topoEdit" class="topo-editable" viewBox="0 0 1000 400" width="100%" height="380"
+         preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+  <p class="muted" style="font-size:12px;margin-top:8px">
+    拖动节点调位置，改完点「保存布局」；导入 JSON 可整套更换拓扑，未出现的设备自动停用隐藏（换设备后 eNSP 串口号会变，请同步改 port）。
+  </p>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">节点（共 <span id="nodeCount">0</span> 个）</h3>
+  <table class="grid">
+    <thead><tr><th>设备</th><th>角色</th><th>X</th><th>Y</th><th>图上显示</th></tr></thead>
+    <tbody id="nodeBody"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">连线（共 <span id="linkCount">0</span> 条）</h3>
+  <div class="toolbar">
+    <select id="lkFrom"></select>
+    <span class="muted">—</span>
+    <select id="lkTo"></select>
+    <input id="lkLabel" placeholder="链路标签，如 Eth-Trunk1" style="width:200px">
+    <select id="lkStyle"></select>
+    <button class="btn" onclick="addLink()">添加连线</button>
+  </div>
+  <table class="grid">
+    <thead><tr><th>ID</th><th>起点</th><th>终点</th><th>标签</th><th>样式</th><th>操作</th></tr></thead>
+    <tbody id="linkBody"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<script src="{{ url_for('static', filename='charts.js') }}"></script>
+<script src="{{ url_for('static', filename='topo.js') }}"></script>
+<script>
+const ROLE_OPTS = [['core', '核心路由器'], ['aggregation', '汇聚交换机'],
+                   ['access', '接入交换机'], ['host', '终端（不采集）'], ['other', '其他']];
+const STYLE_OPTS = [['link', '普通'], ['trunk', 'Trunk'], ['eth-trunk', 'Eth-Trunk'], ['access', '接入']];
+const STYLE_CN = {link: '普通', trunk: 'Trunk', 'eth-trunk': 'Eth-Trunk', access: '接入'};
+
+let NODES = [], LINKS = [], DIRTY = false;
+
+function setHint(t) { document.getElementById('hint').textContent = t || ''; }
+function findNode(id) { return NODES.find(n => n.id === id); }
+
+async function api(url, payload, method) {
+  const res = await fetch(url, {
+    method: method || 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+async function load() {
+  const body = await (await fetch('/api/topology')).json();
+  if (body.code !== 0) { setHint(body.msg); return; }
+  NODES = body.data.nodes;
+  LINKS = body.data.links;
+  DIRTY = false;
+  renderCanvas();
+  renderNodeTable();
+  renderLinkTable();
+  fillSelects();
+  attachDrag();
+  if (!NODES.length) setHint('还没有设备，请先到「设备管理」添加');
+}
+
+function renderCanvas() {
+  renderTopo(document.getElementById('topoEdit'), NODES, LINKS);
+}
+
+function renderNodeTable() {
+  document.getElementById('nodeCount').textContent = NODES.length;
+  document.getElementById('nodeBody').innerHTML = NODES.length ? NODES.map(n => `<tr>
+    <td>${escHtml(n.name)}${n.enabled ? '' : ' <span class="tag warn">停用采集</span>'}</td>
+    <td><select onchange="setRole(${n.id}, this.value)">${ROLE_OPTS.map(o =>
+      `<option value="${o[0]}"${n.role === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></td>
+    <td><input type="number" style="width:78px" value="${n.pos_x === null || n.pos_x === undefined ? '' : n.pos_x}"
+               onchange="setPos(${n.id}, 'x', this.value)"></td>
+    <td><input type="number" style="width:78px" value="${n.pos_y === null || n.pos_y === undefined ? '' : n.pos_y}"
+               onchange="setPos(${n.id}, 'y', this.value)"></td>
+    <td><input type="checkbox"${n.topo_visible ? ' checked' : ''}
+               onchange="setVisible(${n.id}, this.checked)"></td>
+  </tr>`).join('') : '<tr><td colspan="5" class="muted">暂无设备</td></tr>';
+}
+
+function renderLinkTable() {
+  document.getElementById('linkCount').textContent = LINKS.length;
+  const nameOf = id => { const n = findNode(id); return n ? n.name : '#' + id; };
+  document.getElementById('linkBody').innerHTML = LINKS.length ? LINKS.map(l => `<tr>
+    <td>${l.id}</td><td>${escHtml(nameOf(l.from_id))}</td><td>${escHtml(nameOf(l.to_id))}</td>
+    <td>${l.label ? escHtml(l.label) : '<span class="muted">-</span>'}</td>
+    <td>${STYLE_CN[l.style] || escHtml(l.style)}</td>
+    <td><a href="javascript:void(0)" style="color:var(--danger)" onclick="delLink(${l.id})">删除</a></td>
+  </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无连线</td></tr>';
+}
+
+function fillSelects() {
+  const opts = NODES.map(n => `<option value="${n.id}">${escHtml(n.name)}</option>`).join('');
+  document.getElementById('lkFrom').innerHTML = opts;
+  document.getElementById('lkTo').innerHTML = opts;
+  document.getElementById('lkStyle').innerHTML = STYLE_OPTS.map(o =>
+    `<option value="${o[0]}">${o[1]}</option>`).join('');
+}
+
+/* 拖拽时同步表格里的 x/y 输入框 */
+function syncRow(n) {
+  const tr = document.getElementById('nodeBody').children[NODES.indexOf(n)];
+  if (!tr) return;
+  tr.children[2].firstChild.value = n.pos_x === null ? '' : n.pos_x;
+  tr.children[3].firstChild.value = n.pos_y === null ? '' : n.pos_y;
+}
+
+function attachDrag() {
+  topoAttachDrag(document.getElementById('topoEdit'), NODES,
+    n => { syncRow(n); DIRTY = true; setHint('有未保存的改动，点「保存布局」'); },
+    n => { syncRow(n); DIRTY = true; setHint('有未保存的改动，点「保存布局」'); });
+}
+
+function setRole(id, v) {
+  findNode(id).role = v;
+  DIRTY = true;
+  renderCanvas();
+  setHint('有未保存的改动，点「保存布局」');
+}
+
+function setPos(id, axis, v) {
+  const n = findNode(id);
+  const num = v === '' ? null : Number(v);
+  if (num !== null && isNaN(num)) { alert('坐标必须是数字'); return; }
+  if (axis === 'x') n.pos_x = num; else n.pos_y = num;
+  DIRTY = true;
+  renderCanvas();
+  setHint('有未保存的改动，点「保存布局」');
+}
+
+function setVisible(id, checked) {
+  findNode(id).topo_visible = checked ? 1 : 0;
+  DIRTY = true;
+  renderCanvas();
+  setHint('有未保存的改动，点「保存布局」');
+}
+
+function autoArrange() {
+  if (!NODES.length) return;
+  const pos = topoAutoLayout(NODES);
+  NODES.forEach(n => {
+    n.pos_x = pos[n.id].x;
+    n.pos_y = pos[n.id].y;
+    n.topo_visible = 1;
+  });
+  DIRTY = true;
+  renderCanvas();
+  renderNodeTable();
+  setHint('已按角色分层排布，记得点「保存布局」');
+}
+
+async function saveNodes() {
+  const body = await api('/api/topology/nodes', {nodes: NODES.map(n => ({
+    id: n.id, role: n.role, pos_x: n.pos_x, pos_y: n.pos_y, topo_visible: n.topo_visible}))}, 'PUT');
+  if (body.code !== 0) { alert(body.msg); return; }
+  DIRTY = false;
+  setHint('布局已保存');
+}
+
+async function addLink() {
+  const from_id = Number(document.getElementById('lkFrom').value);
+  const to_id = Number(document.getElementById('lkTo').value);
+  if (from_id === to_id) { alert('起点和终点不能是同一台设备'); return; }
+  const body = await api('/api/topology/links', {
+    from_id: from_id, to_id: to_id,
+    label: document.getElementById('lkLabel').value,
+    style: document.getElementById('lkStyle').value,
+  });
+  if (body.code !== 0) { alert(body.msg); return; }
+  document.getElementById('lkLabel').value = '';
+  load();
+}
+
+async function delLink(id) {
+  if (!confirm('确认删除这条连线？')) return;
+  const body = await (await fetch('/api/topology/links/' + id, {method: 'DELETE'})).json();
+  if (body.code !== 0) { alert(body.msg); return; }
+  load();
+}
+
+function exportJson() { window.location = '/api/topology/io?download=1'; }
+
+async function importJson(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  let payload;
+  try {
+    payload = JSON.parse(await f.text());
+  } catch (e) {
+    alert('JSON 解析失败：' + e.message);
+    input.value = '';
+    return;
+  }
+  if (!confirm('导入会按 JSON 内容整体替换拓扑：同名设备更新，JSON 里没有的设备将被停用并隐藏。确认导入？')) {
+    input.value = '';
+    return;
+  }
+  const body = await api('/api/topology/io', payload);
+  input.value = '';
+  if (body.code !== 0) { alert(body.msg); return; }
+  const d = body.data;
+  let msg = `导入完成：新建 ${d.created} 台，更新 ${d.updated} 台，停用 ${d.disabled} 台，连线 ${d.links} 条。`;
+  if (d.warnings && d.warnings.length) msg += '\n\n提示：\n' + d.warnings.join('\n');
+  alert(msg);
+  load();
+}
+
+load();
+</script>
+{% endblock %}

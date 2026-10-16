@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}登录 - 核心网高可用监控系统{% endblock %}
+{% block bare %}
+<div class="login-wrap">
+  <form class="login-card" method="post">
+    <h1>企业核心网高可用<br>路由监控与故障分析系统</h1>
+    <p class="sub">VRRP + BFD + OSPF 联动监控</p>
+    {% with messages = get_flashed_messages() %}
+      {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+    {% endwith %}
+    <label>用户名</label>
+    <input type="text" name="username" required autofocus>
+    <label>密码</label>
+    <input type="password" name="password" required>
+    <button type="submit">登 录</button>
+    <p class="hint">还没有账号？<a href="{{ url_for('auth.register') }}">立即注册</a></p>
+  </form>
+</div>
+{% endblock %}

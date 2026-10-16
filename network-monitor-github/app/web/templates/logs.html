@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block title %}系统日志 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">系统日志</h2>
+<div class="card">
+  <div class="toolbar">
+    <input id="kw" placeholder="搜索用户 / 操作 / 详情" style="width:240px">
+    <button class="btn plain" onclick="load(1)">搜索</button>
+    <span style="flex:1"></span>
+    <span class="muted" id="pageInfo"></span>
+    <button class="btn plain" id="prevBtn" onclick="prevPage()">上一页</button>
+    <button class="btn plain" id="nextBtn" onclick="nextPage()">下一页</button>
+  </div>
+  <table class="grid">
+    <thead><tr><th style="width:180px">时间</th><th style="width:100px">用户</th><th style="width:120px">操作</th><th>详情</th></tr></thead>
+    <tbody id="logBody"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+let page = 1, total = 0;
+const SIZE = 20;
+
+async function load(p) {
+  page = p;
+  const kw = document.getElementById('kw').value.trim();
+  const body = await (await fetch(`/api/logs?page=${p}&size=${SIZE}&keyword=` + encodeURIComponent(kw))).json();
+  if (body.code !== 0) return;
+  total = body.data.total;
+  const pages = Math.max(Math.ceil(total / SIZE), 1);
+  document.getElementById('pageInfo').textContent = `第 ${p} / ${pages} 页，共 ${total} 条`;
+  document.getElementById('prevBtn').disabled = p <= 1;
+  document.getElementById('nextBtn').disabled = p >= pages;
+  document.getElementById('logBody').innerHTML = body.data.items.length ? body.data.items.map(l => `<tr>
+    <td class="muted">${l.created_at}</td><td>${l.username}</td><td>${l.action}</td><td>${l.detail}</td>
+  </tr>`).join('') : '<tr><td colspan="4" class="muted">暂无日志</td></tr>';
+}
+function prevPage() { if (page > 1) load(page - 1); }
+function nextPage() { load(page + 1); }
+document.getElementById('kw').addEventListener('keydown', e => { if (e.key === 'Enter') load(1); });
+load(1);
+</script>
+{% endblock %}

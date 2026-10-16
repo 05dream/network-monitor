@@ -1,0 +1,170 @@
+{% extends 'base.html' %}
+{% block title %}设备管理 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">设备管理</h2>
+<div class="card">
+  <div class="toolbar">
+    <input id="kw" placeholder="搜索设备名 / IP" style="width:220px">
+    <button class="btn plain" onclick="load()">搜索</button>
+    {% if g.user['role'] == 'admin' %}
+    <span style="flex:1"></span>
+    <button class="btn" onclick="openForm()">+ 添加设备</button>
+    {% endif %}
+  </div>
+  <table class="grid">
+    <thead>
+      <tr>
+        <th>ID</th><th>设备名</th><th>地址(串口)</th><th>采集间隔</th><th>在线</th>
+        <th>VRRP</th><th>OSPF邻居</th><th>路由数</th><th>采集状态</th><th>最近采集</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"><tr><td colspan="11" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+{% if g.user['role'] == 'admin' %}
+<div class="modal-mask" id="mask">
+  <div class="modal">
+    <h3 id="formTitle">添加设备</h3>
+    <input type="hidden" id="f_id">
+    <label>设备名 *（如 R1）</label><input id="f_name">
+    <label>拓扑角色（决定在拓扑图里的分层与样式）</label>
+    <select id="f_role">
+      <option value="core">核心路由器</option>
+      <option value="aggregation">汇聚交换机</option>
+      <option value="access">接入交换机</option>
+      <option value="host">终端（不采集）</option>
+      <option value="other" selected>其他</option>
+    </select>
+    <label>IP地址 *（eNSP串口重定向填 127.0.0.1）</label><input id="f_host" placeholder="127.0.0.1">
+    <label>端口 *（eNSP设备串口号，如 2000）</label><input id="f_port" placeholder="2000">
+    <label>VTY用户名（串口方式可空）</label><input id="f_username">
+    <label>VTY密码（串口方式可空）</label><input id="f_password" type="password">
+    <label>采集间隔（秒，1-3600）</label><input id="f_interval" value="5">
+    <label>业务探测目标IP（T4用，如 192.168.30.14）</label><input id="f_ping">
+    <div class="form-err" id="f_err"></div>
+    <div class="actions">
+      <button class="btn plain" onclick="closeForm()">取消</button>
+      <button class="btn" onclick="save()">保存</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<script>
+const IS_ADMIN = {{ 'true' if g.user['role'] == 'admin' else 'false' }};
+
+function tag(text, cls) { return `<span class="tag ${cls}">${text}</span>`; }
+
+function vrrpSummary(json) {
+  try {
+    const arr = JSON.parse(json || '[]');
+    if (!arr.length) return '<span class="muted">-</span>';
+    return arr.map(v => {
+      const cls = v.state === 'Master' ? 'ok' : (v.state === 'Backup' ? 'info' : 'warn');
+      return tag(`VRID${v.vrid} ${v.state}`, cls);
+    }).join(' ');
+  } catch (e) { return '<span class="muted">-</span>'; }
+}
+
+async function load() {
+  const kw = document.getElementById('kw').value.trim();
+  const res = await fetch('/api/devices?keyword=' + encodeURIComponent(kw));
+  const body = await res.json();
+  const tb = document.getElementById('tbody');
+  if (body.code !== 0) { tb.innerHTML = `<tr><td colspan="11">${body.msg}</td></tr>`; return; }
+  if (!body.data.length) { tb.innerHTML = '<tr><td colspan="11" class="muted">暂无设备</td></tr>'; return; }
+  tb.innerHTML = body.data.map(d => {
+    const online = d.online === null || d.online === undefined ? '<span class="muted">未采集</span>'
+      : (d.online ? tag('在线', 'ok') : tag('离线', 'danger'));
+    const task = d.task_status === 'running' ? tag('采集中', 'ok') : tag('已停用', 'warn');
+    let ops = `<a href="/device/${d.id}">详情</a> `;
+    if (IS_ADMIN) {
+      ops += `<a href="javascript:void(0)" onclick="collectNow(${d.id},'${d.name}')">立即采集</a> `
+           + `<a href="javascript:void(0)" onclick="testConn(${d.id},'${d.name}')">测试连接</a> `
+           + `<a href="javascript:void(0)" onclick='openForm(${JSON.stringify(d)})'>编辑</a> `
+           + `<a href="javascript:void(0)" onclick="toggle(${d.id})">${d.enabled ? '停用' : '启用'}</a> `
+           + `<a href="javascript:void(0)" style="color:var(--danger)" onclick="del(${d.id},'${d.name}')">删除</a>`;
+    }
+    return `<tr>
+      <td>${d.id}</td><td>${d.name}</td><td>${d.host}:${d.port}</td><td>${d.collect_interval}s</td>
+      <td>${online}</td><td>${vrrpSummary(d.vrrp_state)}</td>
+      <td>${d.ospf_full ?? '-'}/${d.ospf_neighbors ?? '-'}</td><td>${d.route_count ?? '-'}</td>
+      <td>${task}</td><td class="muted">${d.collected_at || '-'}</td><td>${ops}</td>
+    </tr>`;
+  }).join('');
+}
+
+function openForm(d) {
+  document.getElementById('f_err').textContent = '';
+  document.getElementById('formTitle').textContent = d ? '编辑设备' : '添加设备';
+  document.getElementById('f_id').value = d ? d.id : '';
+  document.getElementById('f_name').value = d ? d.name : '';
+  document.getElementById('f_role').value = d ? (d.role || 'other') : 'other';
+  document.getElementById('f_host').value = d ? d.host : '127.0.0.1';
+  document.getElementById('f_port').value = d ? d.port : '';
+  document.getElementById('f_username').value = d ? (d.username || '') : '';
+  document.getElementById('f_password').value = d ? (d.password || '') : '';
+  document.getElementById('f_interval').value = d ? d.collect_interval : 5;
+  document.getElementById('f_ping').value = d ? (d.ping_target || '') : '';
+  document.getElementById('mask').classList.add('show');
+}
+function closeForm() { document.getElementById('mask').classList.remove('show'); }
+
+async function save() {
+  const id = document.getElementById('f_id').value;
+  const payload = {
+    name: document.getElementById('f_name').value,
+    host: document.getElementById('f_host').value,
+    port: document.getElementById('f_port').value,
+    username: document.getElementById('f_username').value,
+    password: document.getElementById('f_password').value,
+    collect_interval: document.getElementById('f_interval').value,
+    ping_target: document.getElementById('f_ping').value,
+    role: document.getElementById('f_role').value,
+  };
+  const res = await fetch(id ? `/api/devices/${id}` : '/api/devices', {
+    method: id ? 'PUT' : 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json();
+  if (body.code !== 0) { document.getElementById('f_err').textContent = body.msg; return; }
+  closeForm(); load();
+}
+
+async function toggle(id) {
+  const res = await fetch(`/api/devices/${id}/toggle`, {method: 'PATCH'});
+  const body = await res.json();
+  if (body.code !== 0) alert(body.msg);
+  load();
+}
+
+async function collectNow(id, name) {
+  const res = await fetch(`/api/devices/${id}/collect`, {method: 'POST'});
+  const body = await res.json();
+  if (body.code !== 0) { alert(body.msg); return; }
+  alert(`已请求采集 ${name}，调度器将在 1~2 秒内执行，稍后刷新查看结果`);
+  setTimeout(load, 3000);
+}
+
+async function testConn(id, name) {
+  alert(`正在测试 ${name} 的串口连接…`);
+  const res = await fetch(`/api/devices/${id}/test`, {method: 'POST'});
+  const body = await res.json();
+  if (body.code !== 0) { alert(body.msg); return; }
+  alert(body.data.ok ? `✔ ${body.data.msg}` : `✘ ${body.data.msg}`);
+}
+
+async function del(id, name) {
+  if (!confirm(`确认删除设备 ${name}？其采集历史与拓扑连线会一并删除，历史故障事件保留（设备名会显示为空）。`)) return;
+  const res = await fetch(`/api/devices/${id}`, {method: 'DELETE'});
+  const body = await res.json();
+  if (body.code !== 0) alert(body.msg);
+  load();
+}
+
+document.getElementById('kw').addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+load();
+</script>
+{% endblock %}

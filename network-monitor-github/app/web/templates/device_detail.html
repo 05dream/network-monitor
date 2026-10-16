@@ -1,0 +1,130 @@
+{% extends 'base.html' %}
+{% block title %}设备详情 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">设备详情 <span class="muted" style="font-size:13px" id="devName"></span></h2>
+<script src="{{ url_for('static', filename='charts.js') }}"></script>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">基本信息</h3>
+  <table class="grid"><tbody id="infoBody"><tr><td class="muted">加载中…</td></tr></tbody></table>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">最新一轮采集 <span class="muted" style="font-size:12px" id="latestAt"></span></h3>
+  <div id="latestBox" class="muted">加载中…</div>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">指标趋势 <span class="muted" style="font-size:12px" id="trendRange"></span></h3>
+  <div class="trend-grid">
+    <div><p class="trend-title">路由条目数</p><div id="chartRoutes" class="chart-box"></div></div>
+    <div><p class="trend-title">OSPF 邻居 / Full</p><div id="chartOspf" class="chart-box"></div></div>
+  </div>
+  <p class="trend-title" style="margin-top:12px">在线状态（红=离线）</p>
+  <div id="barOnline" class="chart-box"></div>
+  <p class="trend-title" style="margin-top:10px">业务连通性（绿=通 红=不通 灰=未测）</p>
+  <div id="barPing" class="chart-box"></div>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">采集历史（最近30轮）</h3>
+  <table class="grid">
+    <thead><tr><th>时间</th><th>在线</th><th>VRRP</th><th>OSPF</th><th>路由数</th><th>业务ping</th><th>异常说明</th></tr></thead>
+    <tbody id="hisBody"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+const DID = {{ device_id }};
+function tag(t, c) { return `<span class="tag ${c}">${t}</span>`; }
+function vrrpTags(arr) {
+  if (!arr || !arr.length) return '<span class="muted">-</span>';
+  return arr.map(v => tag(`VRID${v.vrid} ${v.state}`,
+    v.state === 'Master' ? 'ok' : (v.state === 'Backup' ? 'info' : 'warn'))).join(' ');
+}
+function pingTag(p) {
+  if (p === null || p === undefined || p === -1) return '<span class="muted">-</span>';
+  return p === 1 ? tag('通', 'ok') : tag('不通', 'danger');
+}
+
+async function loadDetail() {
+  const body = await (await fetch(`/api/devices/${DID}/detail`)).json();
+  if (body.code !== 0) { document.getElementById('infoBody').innerHTML = `<tr><td>${body.msg}</td></tr>`; return; }
+  const d = body.data;
+  document.getElementById('devName').textContent = d.name;
+  document.getElementById('infoBody').innerHTML = `
+    <tr><th style="width:120px">采集地址</th><td>${d.host}:${d.port}（eNSP串口）</td>
+        <th style="width:120px">采集间隔</th><td>${d.collect_interval} 秒</td></tr>
+    <tr><th>业务探测目标</th><td>${d.ping_target || '-'}</td>
+        <th>路由基线</th><td>${d.route_count_baseline || '未学习'}</td></tr>
+    <tr><th>采集状态</th><td>${d.enabled ? tag('启用','ok') : tag('停用','warn')}</td>
+        <th>任务统计</th><td>${d.task ? `成功 ${d.task.run_count - d.task.fail_count} / 失败 ${d.task.fail_count} / 共 ${d.task.run_count} 轮` : '-'}</td></tr>`;
+
+  const box = document.getElementById('latestBox');
+  const s = d.latest;
+  if (!s) { box.innerHTML = '<span class="muted">尚未采集</span>'; return; }
+  document.getElementById('latestAt').textContent = s.collected_at;
+  if (!s.online) {
+    box.innerHTML = `${tag('离线','danger')} <span class="muted">${s.error || ''}</span>`;
+    return;
+  }
+  const vrrpRows = s.vrrp_state.map(v =>
+    `<tr><td>${v.vrid}</td><td>${v.state}</td><td>${v.interface}</td><td>${v.vip}</td></tr>`).join('');
+  const ospfRows = s.ospf_state.map(p =>
+    `<tr><td>${p.neighbor}</td><td>${p.interface}</td><td>${p.area}</td>
+     <td>${p.state === 'Full' ? tag('Full','ok') : tag(p.state,'warn')}</td></tr>`).join('');
+  const intfRows = s.interfaces.map(i =>
+    `<tr><td>${i.name}</td><td>${i.phy === 'up' ? tag('up','ok') : tag(i.phy,'danger')}</td>
+     <td>${i.protocol === 'up' ? tag('up','ok') : tag(i.protocol,'danger')}</td></tr>`).join('');
+  box.innerHTML = `
+    <p style="margin-bottom:8px">${tag('在线','ok')}　路由条目：<b>${s.route_count}</b>（基线 ${d.route_count_baseline || '-'}）　业务ping：${pingTag(s.biz_ping_ok)}</p>
+    <h4 style="margin:10px 0 6px">VRRP</h4>
+    <table class="grid"><thead><tr><th>VRID</th><th>状态</th><th>接口</th><th>虚拟IP</th></tr></thead><tbody>${vrrpRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+    <h4 style="margin:10px 0 6px">OSPF 邻居</h4>
+    <table class="grid"><thead><tr><th>邻居ID</th><th>接口</th><th>区域</th><th>状态</th></tr></thead><tbody>${ospfRows || '<tr><td colspan="4" class="muted">无</td></tr>'}</tbody></table>
+    <h4 style="margin:10px 0 6px">接口</h4>
+    <table class="grid"><thead><tr><th>接口</th><th>物理</th><th>协议</th></tr></thead><tbody>${intfRows || '<tr><td colspan="3" class="muted">无</td></tr>'}</tbody></table>`;
+}
+
+async function loadHistory() {
+  const body = await (await fetch(`/api/devices/${DID}/history?limit=30`)).json();
+  if (body.code !== 0) return;
+  document.getElementById('hisBody').innerHTML = body.data.length ? body.data.map(s => {
+    let vrrp = [];
+    try { vrrp = JSON.parse(s.vrrp_state || '[]'); } catch (e) {}
+    return `<tr>
+      <td class="muted">${s.collected_at}</td>
+      <td>${s.online ? tag('在线','ok') : tag('离线','danger')}</td>
+      <td>${vrrpTags(vrrp)}</td>
+      <td>${s.ospf_full}/${s.ospf_neighbors}</td><td>${s.route_count}</td>
+      <td>${pingTag(s.biz_ping_ok)}</td>
+      <td class="muted" style="max-width:240px;overflow:hidden;text-overflow:ellipsis">${s.error || ''}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="7" class="muted">暂无历史</td></tr>';
+}
+
+/* 趋势图：取最近60轮，画路由数/OSPF邻居折线 + 在线/业务ping状态条 */
+async function loadTrend() {
+  const body = await (await fetch(`/api/devices/${DID}/history?limit=60`)).json();
+  if (body.code !== 0) return;
+  const rows = body.data.slice().reverse();          // 旧 -> 新
+  if (!rows.length) return;
+  const hm = s => (s || '').slice(11, 16) || s;
+  document.getElementById('trendRange').textContent =
+    `（${hm(rows[0].collected_at)} ~ ${hm(rows[rows.length - 1].collected_at)}，共 ${rows.length} 轮）`;
+  const pts = rows.map(s => ({x: hm(s.collected_at), y: s.online ? s.route_count : null}));
+  lineChart(document.getElementById('chartRoutes'), pts, {color: 'var(--primary)', unit: ' 条'});
+  lineChart(document.getElementById('chartOspf'),
+    rows.map(s => ({x: hm(s.collected_at), y: s.online ? s.ospf_neighbors : null})),
+    {color: 'var(--ok)', unit: ' 个', yMin: 0});
+  sparkbar(document.getElementById('barOnline'), rows.map(s => ({x: s.collected_at, v: s.online})),
+    v => v ? 'var(--ok)' : 'var(--danger)');
+  sparkbar(document.getElementById('barPing'), rows.map(s => ({x: s.collected_at, v: s.biz_ping_ok})),
+    v => v === 1 ? 'var(--ok)' : (v === 0 ? 'var(--danger)' : 'var(--dim)'));
+}
+
+loadDetail(); loadHistory(); loadTrend();
+setInterval(() => { loadDetail(); loadHistory(); loadTrend(); }, 10000);
+window.addEventListener('resize', () => loadTrend());
+</script>
+{% endblock %}

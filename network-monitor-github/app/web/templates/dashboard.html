@@ -1,0 +1,117 @@
+{% extends 'base.html' %}
+{% block title %}运行仪表盘 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">运行仪表盘 <span class="muted" style="font-size:12px" id="ts"></span></h2>
+
+<div class="stat-grid">
+  <div class="stat"><div class="num" id="s_total">-</div><div class="label">设备总数</div></div>
+  <div class="stat"><div class="num" style="color:var(--ok)" id="s_online">-</div><div class="label">在线</div></div>
+  <div class="stat"><div class="num" style="color:var(--danger)" id="s_offline">-</div><div class="label">离线</div></div>
+  <div class="stat"><div class="num" id="s_vrrp">-</div><div class="label">VRRP Master / Backup</div></div>
+  <div class="stat"><div class="num" id="s_ospf">-</div><div class="label">OSPF Full / 邻居</div></div>
+  <div class="stat"><div class="num" style="color:var(--warn)" id="s_alert">-</div><div class="label">待处理告警</div></div>
+  <div class="stat"><div class="num" id="s_uptime">-</div><div class="label">24h 在线率</div></div>
+  <div class="stat"><div class="num" id="s_events">-</div><div class="label">24h 故障事件</div></div>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">核心网拓扑实时状态
+    <span class="muted" style="font-size:12px">（绿=在线　红=离线　灰=停用　M=VRRP Master 组数）</span></h3>
+  <div class="topo-wrap">
+    <svg id="topo" viewBox="0 0 1000 400" width="100%" height="380" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">设备实时状态</h3>
+  <table class="grid">
+    <thead><tr><th>设备</th><th>在线</th><th>VRRP</th><th>OSPF Full/邻居</th><th>路由数</th><th>业务ping</th><th>最近采集</th><th></th></tr></thead>
+    <tbody id="devBody"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3 style="margin-bottom:10px;font-size:15px">最近故障事件</h3>
+  <table class="grid">
+    <thead><tr><th>ID</th><th>设备</th><th>事件</th><th>开始时间</th><th>状态</th></tr></thead>
+    <tbody id="evBody"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<script src="{{ url_for('static', filename='charts.js') }}"></script>
+<script src="{{ url_for('static', filename='topo.js') }}"></script>
+<script>
+function tag(t, c) { return `<span class="tag ${c}">${t}</span>`; }
+const TYPE_CN = {vrrp_switch: 'VRRP切换', offline: '设备离线', ospf_change: 'OSPF变化', recover: '恢复'};
+
+function vrrpTags(arr) {
+  if (!arr || !arr.length) return '<span class="muted">-</span>';
+  return arr.map(v => tag(`VRID${v.vrid} ${v.state}`,
+    v.state === 'Master' ? 'ok' : (v.state === 'Backup' ? 'info' : 'warn'))).join(' ');
+}
+function pingTag(p) {
+  if (p === null || p === undefined || p === -1) return '<span class="muted">-</span>';
+  return p === 1 ? tag('通', 'ok') : tag('不通', 'danger');
+}
+
+/* 拓扑：几何只在设备/连线数据变化时重建，状态每轮只刷新颜色与徽章 */
+let topoSig = '';
+async function loadTopo() {
+  const body = await (await fetch('/api/topology')).json();
+  if (body.code !== 0) return;
+  const nodes = body.data.nodes, links = body.data.links;
+  const sig = JSON.stringify(nodes.map(n => [n.id, n.role, n.pos_x, n.pos_y, n.topo_visible, n.enabled]))
+    + '|' + JSON.stringify(links);
+  if (sig !== topoSig) {
+    topoSig = sig;
+    renderTopo(document.getElementById('topo'), nodes, links);
+  } else {
+    applyTopoStatus(nodes);
+  }
+}
+
+async function load() {
+  const res = await fetch('/api/dashboard');
+  const body = await res.json();
+  if (body.code !== 0) return;
+  const d = body.data;
+  document.getElementById('s_total').textContent = d.devices_total;
+  document.getElementById('s_online').textContent = d.devices_online;
+  document.getElementById('s_offline').textContent = d.devices_offline;
+  document.getElementById('s_vrrp').textContent = `${d.vrrp_masters} / ${d.vrrp_backups}`;
+  document.getElementById('s_ospf').textContent = `${d.ospf_full} / ${d.ospf_neighbors}`;
+  document.getElementById('s_alert').textContent = d.pending_alerts;
+  document.getElementById('ts').textContent = '最近采集：' + d.last_collect_at;
+
+  document.getElementById('devBody').innerHTML = d.cards.length ? d.cards.map(c => `<tr>
+    <td>${c.name}${c.enabled ? '' : ' <span class="tag warn">已停用</span>'}</td>
+    <td>${c.online === null ? '<span class="muted">未采集</span>' : (c.online ? tag('在线','ok') : tag('离线','danger'))}</td>
+    <td>${vrrpTags(c.vrrp)}</td><td>${c.ospf}</td><td>${c.routes}</td>
+    <td>${pingTag(c.ping)}</td>
+    <td class="muted">${c.collected_at || '-'}</td>
+    <td><a href="/device/${c.id}">详情</a></td>
+  </tr>`).join('') : '<tr><td colspan="8" class="muted">暂无设备，请先到「设备管理」添加</td></tr>';
+
+  document.getElementById('evBody').innerHTML = d.recent_events.length ? d.recent_events.map(e => `<tr>
+    <td>${e.id}</td><td>${e.device_name || '-'}</td>
+    <td>${tag(TYPE_CN[e.event_type] || e.event_type, e.event_type === 'offline' ? 'danger' : 'warn')} ${e.title}</td>
+    <td class="muted">${e.started_at}</td>
+    <td>${e.status === 'pending' ? tag('处理中', 'warn') : (e.status === 'confirmed' ? tag('已确认', 'info') : tag('已关闭', 'ok'))}</td>
+  </tr>`).join('') : '<tr><td colspan="5" class="muted">暂无事件</td></tr>';
+}
+
+/* 24h 统计卡片 */
+async function loadSummary() {
+  try {
+    const body = await (await fetch('/api/stats/summary')).json();
+    if (body.code !== 0) return;
+    document.getElementById('s_uptime').textContent =
+      body.data.uptime_pct === null ? '-' : body.data.uptime_pct + '%';
+    document.getElementById('s_events').textContent = body.data.events_24h;
+  } catch (e) { /* 忽略统计刷新失败 */ }
+}
+
+load(); loadSummary(); loadTopo();
+setInterval(() => { load(); loadSummary(); loadTopo(); }, 5000);
+</script>
+{% endblock %}

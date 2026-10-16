@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}核心网高可用监控系统{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script>
+/* 主题：尽早应用，避免闪烁 */
+if (localStorage.getItem('theme') === 'dark') {
+  document.documentElement.dataset.theme = 'dark';
+}
+</script>
+</head>
+<body>
+{% if g.user %}
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">核心网监控</div>
+    <nav>
+      <a href="{{ url_for('pages.dashboard') }}" class="{{ 'active' if request.endpoint=='pages.dashboard' }}">运行仪表盘</a>
+      <a href="{{ url_for('pages.devices') }}" class="{{ 'active' if request.endpoint=='pages.devices' }}">设备管理</a>
+      {% if g.user['role'] == 'admin' %}
+      <a href="{{ url_for('pages.topology') }}" class="{{ 'active' if request.endpoint=='pages.topology' }}">拓扑管理</a>
+      <a href="{{ url_for('pages.drill') }}" class="{{ 'active' if request.endpoint=='pages.drill' }}">故障演练</a>
+      {% endif %}
+      <a href="{{ url_for('pages.events') }}" class="{{ 'active' if request.endpoint=='pages.events' }}">故障事件
+        <span id="alertBadge" class="nav-badge" style="display:none"></span></a>
+      <a href="{{ url_for('pages.logs') }}" class="{{ 'active' if request.endpoint=='pages.logs' }}">系统日志</a>
+      <a href="{{ url_for('pages.reports') }}" class="{{ 'active' if request.endpoint=='pages.reports' }}">巡检报告</a>
+      <a href="{{ url_for('pages.screen') }}" target="_blank">运行大屏 ↗</a>
+      {% if g.user['role'] == 'admin' %}
+      <a href="{{ url_for('pages.users') }}" class="{{ 'active' if request.endpoint=='pages.users' }}">用户管理</a>
+      {% endif %}
+    </nav>
+    <div class="user-box">
+      <span>{{ g.user['username'] }}（{{ '管理员' if g.user['role']=='admin' else '查看者' }}）</span>
+      <a href="{{ url_for('auth.logout') }}">退出</a>
+    </div>
+  </aside>
+  <main class="content">
+    <button class="btn plain theme-btn" id="themeBtn" onclick="toggleTheme()"></button>
+    {% with messages = get_flashed_messages() %}
+      {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+<script>
+/* 明暗主题切换（localStorage 记忆） */
+function applyThemeBtn() {
+  document.getElementById('themeBtn').textContent =
+    document.documentElement.dataset.theme === 'dark' ? '浅色模式' : '深色模式';
+}
+function toggleTheme() {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  if (dark) { delete document.documentElement.dataset.theme; localStorage.setItem('theme', 'light'); }
+  else { document.documentElement.dataset.theme = 'dark'; localStorage.setItem('theme', 'dark'); }
+  applyThemeBtn();
+}
+applyThemeBtn();
+
+/* 侧边栏待处理告警角标 */
+async function refreshBadge() {
+  try {
+    const body = await (await fetch('/api/alerts?status=pending')).json();
+    const n = body.code === 0 ? body.data.length : 0;
+    const b = document.getElementById('alertBadge');
+    b.textContent = n > 99 ? '99+' : n;
+    b.style.display = n ? '' : 'none';
+  } catch (e) { /* 忽略 */ }
+}
+refreshBadge();
+setInterval(refreshBadge, 10000);
+</script>
+{% else %}
+{% block bare %}{% endblock %}
+{% endif %}
+</body>
+</html>

@@ -1,0 +1,156 @@
+{% extends 'base.html' %}
+{% block title %}故障事件 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">故障事件</h2>
+
+<div class="card" id="alertCard" style="display:none">
+  <h3 style="margin-bottom:10px;font-size:15px">待处理告警
+    {% if g.user['role'] == 'admin' %}
+    <button class="btn plain" style="float:right" onclick="confirmAllAlerts()">一键全部确认</button>
+    {% endif %}
+  </h3>
+  <table class="grid">
+    <thead><tr><th>ID</th><th>级别</th><th>设备</th><th>内容</th><th>时间</th>{% if g.user['role'] == 'admin' %}<th>操作</th>{% endif %}</tr></thead>
+    <tbody id="alertBody"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <div class="toolbar">
+    <select id="f_status">
+      <option value="">全部状态</option><option value="pending">处理中</option>
+      <option value="confirmed">已确认</option><option value="closed">已关闭</option>
+    </select>
+    <select id="f_type">
+      <option value="">全部类型</option><option value="vrrp_switch">VRRP切换</option><option value="offline">设备离线</option>
+    </select>
+    <select id="f_device"><option value="">全部设备</option></select>
+    <button class="btn plain" onclick="load()">查询</button>
+    <span style="flex:1"></span>
+    <button class="btn plain" onclick="exportCsv()">导出事件CSV</button>
+    <button class="btn plain" onclick="exportStatus()">导出历史CSV</button>
+  </div>
+  <table class="grid">
+    <thead><tr>
+      <th>ID</th><th>设备</th><th>类型</th><th>开始时间</th><th>结束时间</th><th>状态</th>
+      <th>检测ms</th><th>收敛ms</th><th>恢复ms</th><th>总中断ms</th><th>T1~T4 时间线</th>
+      {% if g.user['role'] == 'admin' %}<th>操作</th>{% endif %}
+    </tr></thead>
+    <tbody id="evBody"><tr><td colspan="12" class="muted">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<script src="{{ url_for('static', filename='charts.js') }}"></script>
+<script>
+const IS_ADMIN = {{ 'true' if g.user['role'] == 'admin' else 'false' }};
+function tag(t, c) { return `<span class="tag ${c}">${t}</span>`; }
+const TYPE_CN = {vrrp_switch: 'VRRP切换', offline: '设备离线'};
+const LEVEL_CLS = {critical: 'danger', warning: 'warn', info: 'info'};
+const STATUS_CN = {pending: ['处理中', 'warn'], confirmed: ['已确认', 'info'], closed: ['已关闭', 'ok']};
+
+function qs() {
+  const p = new URLSearchParams();
+  if (document.getElementById('f_status').value) p.set('status', document.getElementById('f_status').value);
+  if (document.getElementById('f_type').value) p.set('type', document.getElementById('f_type').value);
+  if (document.getElementById('f_device').value) p.set('device_id', document.getElementById('f_device').value);
+  return p.toString();
+}
+
+function msBetween(a, b) {
+  if (!a || !b) return 0;
+  return Math.max(new Date(b.replace(' ', 'T')) - new Date(a.replace(' ', 'T')), 0);
+}
+
+/* 一条事件的 T1~T4 时间线分段 */
+function renderTimeline(e) {
+  const box = document.getElementById('tl-' + e.id);
+  if (!box) return;
+  if (!e.t1_at) { box.innerHTML = '<span class="muted">-</span>'; return; }
+  const segs = [];
+  if (e.detect_ms) segs.push({label: '故障→检测', ms: e.detect_ms, color: 'var(--danger)'});
+  if (e.t1_at && e.t2_at) segs.push({label: 'T1→T2 OSPF', ms: msBetween(e.t1_at, e.t2_at), color: 'var(--warn)'});
+  if (e.t2_at && e.t3_at) segs.push({label: 'T2→T3 路由收敛', ms: msBetween(e.t2_at, e.t3_at), color: 'var(--primary)'});
+  if (e.t3_at && e.t4_at) segs.push({label: 'T3→T4 业务恢复', ms: msBetween(e.t3_at, e.t4_at), color: 'var(--ok)'});
+  if (!segs.length) { box.innerHTML = '<span class="muted">待推进</span>'; return; }
+  timelineBar(box, segs);
+}
+
+async function loadDevices() {
+  const body = await (await fetch('/api/devices')).json();
+  if (body.code !== 0) return;
+  document.getElementById('f_device').innerHTML = '<option value="">全部设备</option>' +
+    body.data.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+}
+
+async function loadAlerts() {
+  const body = await (await fetch('/api/alerts?status=pending')).json();
+  if (body.code !== 0) return;
+  const card = document.getElementById('alertCard');
+  if (!body.data.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  document.getElementById('alertBody').innerHTML = body.data.map(a => `<tr>
+    <td>${a.id}</td><td>${tag(a.level, LEVEL_CLS[a.level] || 'info')}</td>
+    <td>${a.device_name || '-'}</td><td>${a.message}</td><td class="muted">${a.created_at}</td>
+    ${IS_ADMIN ? `<td><button class="btn" onclick="confirmAlert(${a.id})">确认</button></td>` : ''}
+  </tr>`).join('');
+}
+
+async function confirmAlert(id) {
+  const body = await (await fetch(`/api/alerts/${id}/confirm`, {method: 'POST'})).json();
+  if (body.code !== 0) alert(body.msg);
+  loadAlerts();
+}
+
+async function confirmAllAlerts() {
+  const body = await (await fetch('/api/alerts?status=pending')).json();
+  if (body.code !== 0) return;
+  for (const a of body.data) {
+    await fetch(`/api/alerts/${a.id}/confirm`, {method: 'POST'});
+  }
+  loadAlerts();
+}
+
+async function load() {
+  const body = await (await fetch('/api/events?' + qs())).json();
+  if (body.code !== 0) return;
+  const cell = v => v === null || v === undefined || v === '' ? '<span class="muted">-</span>' : v;
+  document.getElementById('evBody').innerHTML = body.data.length ? body.data.map(e => {
+    const st = STATUS_CN[e.status] || [e.status, 'info'];
+    const ops = IS_ADMIN ? `<td>
+        ${e.status === 'pending' ? `<button class="btn plain" onclick="confirmEvent(${e.id})">确认</button> ` : ''}
+        ${e.status !== 'closed' ? `<button class="btn plain" onclick="closeEvent(${e.id})">关闭</button>` : '-'}</td>` : '';
+    return `<tr>
+      <td>${e.id}</td><td>${e.device_name || '-'}</td>
+      <td>${tag(TYPE_CN[e.event_type] || e.event_type, e.event_type === 'offline' ? 'danger' : 'warn')}</td>
+      <td class="muted">${e.started_at}</td><td class="muted">${e.ended_at || '-'}</td>
+      <td>${tag(st[0], st[1])}</td>
+      <td>${cell(e.detect_ms)}</td><td>${cell(e.converge_ms)}</td>
+      <td>${cell(e.recover_ms)}</td><td><b>${cell(e.total_ms)}</b></td>
+      <td style="min-width:220px"><div id="tl-${e.id}" class="tl-cell"></div>
+          <span class="muted" style="font-size:11px">T1 ${cell(e.t1_at)}　T2 ${cell(e.t2_at)}　T3 ${cell(e.t3_at)}　T4 ${cell(e.t4_at)}</span></td>
+      ${ops}
+    </tr>`;
+  }).join('') : '<tr><td colspan="12" class="muted">暂无事件</td></tr>';
+  body.data.forEach(renderTimeline);
+}
+
+async function confirmEvent(id) {
+  const body = await (await fetch(`/api/events/${id}/confirm`, {method: 'POST'})).json();
+  if (body.code !== 0) alert(body.msg);
+  load();
+}
+
+async function closeEvent(id) {
+  if (!confirm('确认手动关闭该事件？')) return;
+  const body = await (await fetch(`/api/events/${id}/close`, {method: 'POST'})).json();
+  if (body.code !== 0) alert(body.msg);
+  load();
+}
+
+function exportCsv() { window.location = '/api/events/export?' + qs(); }
+function exportStatus() { window.location = '/api/status/export?hours=24'; }
+
+loadDevices(); loadAlerts(); load();
+setInterval(() => { loadAlerts(); load(); }, 10000);
+</script>
+{% endblock %}

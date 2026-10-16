@@ -1,0 +1,124 @@
+{% extends 'base.html' %}
+{% block title %}故障演练 - 核心网高可用监控系统{% endblock %}
+{% block content %}
+<h2 class="page-title">故障演练</h2>
+
+<div class="card">
+  <h3 style="font-size:15px;margin-bottom:12px">选择演练剧本</h3>
+  <div class="drill-grid" id="scGrid"><p class="muted">加载中…</p></div>
+</div>
+
+<div class="card" id="runCard" style="display:none">
+  <h3 style="font-size:15px;margin-bottom:10px">
+    演练进行中：<span id="runName"></span>
+    <span class="muted" id="runClock" style="font-size:12px"></span>
+    <span style="float:right">
+      <button class="btn plain" onclick="stopDrill()">结束演练</button>
+      <button class="btn danger" onclick="cleanDrill()">清理演练数据</button>
+    </span>
+  </h3>
+  <p class="muted" id="baseInfo" style="font-size:12px;margin-bottom:10px"></p>
+  <table class="grid">
+    <thead><tr><th>演练设备</th><th>状态</th><th>VRRP</th><th>OSPF</th><th>路由数</th>
+      <th>业务 ping</th><th>最近采集</th></tr></thead>
+    <tbody id="devBody"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3 style="font-size:15px;margin-bottom:10px">本次演练产生的事件</h3>
+  <table class="grid">
+    <thead><tr><th>ID</th><th>设备</th><th>类型</th><th>状态</th><th>开始</th>
+      <th>T1</th><th>T2</th><th>T3</th><th>T4</th>
+      <th>检测</th><th>收敛</th><th>业务恢复</th><th>总中断</th></tr></thead>
+    <tbody id="evBody"><tr><td colspan="13" class="muted">本次演练还没有产生事件</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+const TYPE_CN = {vrrp_switch: 'VRRP切换', offline: '设备离线', ospf_change: 'OSPF变化', recover: '故障恢复'};
+const ST_CN = {pending: ['处理中', 'warn'], confirmed: ['已确认', 'info'], closed: ['已关闭', 'ok']};
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+function tag(t, c) { return `<span class="tag ${c}">${esc(t)}</span>`; }
+function fmtMs(ms) { return ms === null || ms === undefined ? '-' : (ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms'); }
+function hm(s) { return s ? String(s).split('.')[0] : '-'; }
+function pingTag(p) { return p === null || p === undefined || p === -1 ? '<span class="muted">-</span>' : (p === 1 ? tag('通', 'ok') : tag('不通', 'danger')); }
+function vrrpTags(arr) {
+  if (!arr || !arr.length) return '<span class="muted">-</span>';
+  return arr.map(v => tag(`VRID${v.vrid} ${v.state}`, v.state === 'Master' ? 'ok' : (v.state === 'Backup' ? 'info' : 'warn'))).join(' ');
+}
+
+async function loadScenarios() {
+  const b = await (await fetch('/api/drill/scenarios')).json();
+  if (b.code !== 0) return;
+  document.getElementById('scGrid').innerHTML = b.data.map(s => `<div class="drill-card" id="sc-${s.key}">
+    <h4>${esc(s.name)}</h4>
+    <p class="meta">${s.device_count} 台虚拟设备 · 约 ${s.duration} 秒 · 每 ${s.interval} 秒采集一轮</p>
+    <p class="desc">${esc(s.desc)}</p>
+    <button class="btn" onclick="startDrill('${s.key}')">开始演练</button>
+  </div>`).join('');
+}
+
+async function startDrill(key) {
+  const b = await (await fetch('/api/drill/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({scenario: key})})).json();
+  if (b.code !== 0) return alert(b.msg);
+  alert(`演练已开始：约 ${b.data.duration} 秒走完「故障 → 检测 → 恢复」全过程。\n`
+      + '可以切到「运行仪表盘」或「运行大屏」观察演练设备变红、VRRP 主备切换。');
+  loadStatus();
+}
+
+async function stopDrill() {
+  if (!confirm('结束演练？（停用演练设备的采集，数据保留便于复盘）')) return;
+  const b = await (await fetch('/api/drill/stop', {method: 'POST'})).json();
+  if (b.code !== 0) alert(b.msg);
+  loadStatus();
+}
+
+async function cleanDrill() {
+  if (!confirm('清理演练数据？\n将删除演练虚拟设备、采集历史与拓扑连线；历史故障事件会保留（设备名显示为空）。')) return;
+  const b = await (await fetch('/api/drill/clean', {method: 'DELETE'})).json();
+  if (b.code !== 0) alert(b.msg);
+  loadStatus();
+}
+
+async function loadStatus() {
+  const b = await (await fetch('/api/drill/status')).json();
+  if (b.code !== 0) return;
+  const d = b.data;
+  const card = document.getElementById('runCard');
+  card.style.display = d.running ? '' : 'none';
+  if (d.running) {
+    card.classList.add('drill-run');
+    document.getElementById('runName').textContent = d.scenario_name || d.scenario;
+    const bl = d.baseline || {};
+    document.getElementById('baseInfo').innerHTML = bl.linked && bl.names.length
+      ? `数据基线：eNSP 真实设备 <b>${bl.names.map(esc).join('、')}</b>`
+      : '数据基线：内置默认值（eNSP 真实设备暂无采集数据）';
+    const left = d.duration && d.elapsed !== null ? Math.max(d.duration - d.elapsed, 0) : null;
+    document.getElementById('runClock').textContent =
+      d.elapsed === null ? '' : `（已运行 ${d.elapsed}s${left !== null ? `，剧本约剩 ${left}s` : ''}）`;
+    document.getElementById('devBody').innerHTML = d.devices.map(v => `<tr>
+      <td>${esc(v.name)}${v.enabled ? '' : ' ' + tag('已结束', 'warn')}</td>
+      <td>${v.online === null ? '<span class="muted">未采集</span>' : (v.online ? tag('在线', 'ok') : tag('离线', 'danger'))}</td>
+      <td>${vrrpTags(v.vrrp)}</td><td>${esc(v.ospf)}</td><td>${esc(v.routes)}</td>
+      <td>${pingTag(v.ping)}</td><td class="muted">${esc(hm(v.collected_at))}</td></tr>`).join('');
+  }
+  const evs = d.events || [];
+  document.getElementById('evBody').innerHTML = evs.length ? evs.map(e => {
+    const st = ST_CN[e.status] || [e.status, 'info'];
+    return `<tr><td>${e.id}</td><td>${esc(e.device_name || '-')}</td>
+      <td>${tag(TYPE_CN[e.event_type] || e.event_type, e.event_type === 'offline' ? 'danger' : 'warn')}</td>
+      <td>${tag(st[0], st[1])}</td><td class="muted">${esc(hm(e.started_at))}</td>
+      <td class="muted">${esc(hm(e.t1_at))}</td><td class="muted">${esc(hm(e.t2_at))}</td>
+      <td class="muted">${esc(hm(e.t3_at))}</td><td class="muted">${esc(hm(e.t4_at))}</td>
+      <td>${fmtMs(e.detect_ms)}</td><td>${fmtMs(e.converge_ms)}</td>
+      <td>${fmtMs(e.recover_ms)}</td><td><b>${fmtMs(e.total_ms)}</b></td></tr>`;
+  }).join('') : '<tr><td colspan="13" class="muted">本次演练还没有产生事件</td></tr>';
+}
+
+loadScenarios(); loadStatus();
+setInterval(loadStatus, 3000);
+</script>
+{% endblock %}
